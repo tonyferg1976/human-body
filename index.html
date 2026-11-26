@@ -58,6 +58,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-of
 .qbar button{min-height:36px;padding:4px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:14px}
 .qbar .sc{color:var(--mut);font-size:14px}
 .qbar.ok{border-color:#5fd38a}.qbar.no{border-color:#ef7b6b}
+.loading{position:absolute;inset:0;display:grid;place-items:center;color:var(--mut);font-size:15px;padding:20px;text-align:center}
 .err{position:absolute;inset:auto 20px 50% 20px;text-align:center;color:var(--mut)}
 .info h2{font:500 clamp(30px,3vw,40px)/1.05 "IBM Plex Serif",Georgia,serif;margin:4px 0 4px;text-wrap:balance}
 .aka{font:italic 400 17px/1.4 "IBM Plex Serif",serif;color:var(--mut);margin:0 0 12px}
@@ -102,6 +103,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-of
  </aside>
  <section class="stage" id="stage">
   <canvas id="cv" aria-label="3D model of the human body. Drag to rotate, scroll to zoom, click a part to select it."></canvas>
+  <div class="loading" id="loading">Loading 3D anatomy (about 3 MB)…</div>
   <div class="tip" id="tip"></div>
   <div class="pin" id="pin"><b></b><span></span></div>
   <div class="qbar" id="qbar"></div>
@@ -351,154 +353,73 @@ const byId=Object.fromEntries(PARTS.map(p=>[p.id,p]));
 if(!window.THREE){$('#stage').insertAdjacentHTML('beforeend','<p class="err">The 3D engine could not load. Check your internet connection and reload the page.</p>');}
 else init();
 
-function init(){
+async function init(){
 const T3=THREE,V=(x,y,z)=>new T3.Vector3(x,y,z),P=a=>V(a[0],a[1],a[2]);
 const lerp=(a,b,t)=>a+(b-a)*t;
-function interp(xs,ys,x){if(x<=xs[0])return ys[0];for(let i=1;i<xs.length;i++)if(x<=xs[i]){const t=(x-xs[i-1])/(xs[i]-xs[i-1]);return lerp(ys[i-1],ys[i],t);}return ys[ys.length-1];}
-const spineZ=y=>interp([0.96,1.05,1.13,1.25,1.38,1.47,1.58],[-0.07,-0.045,-0.036,-0.06,-0.072,-0.052,-0.03],y);
 
-/* ---- geometry helpers ---- */
-function tube(pts,r,seg=48,rs=8){return new T3.TubeGeometry(new T3.CatmullRomCurve3(pts.map(P)),seg,r,rs,false);}
-function xform(pos,scl,rot){return new T3.Matrix4().compose(P(pos),new T3.Quaternion().setFromEuler(new T3.Euler(...(rot||[0,0,0]))),P(scl));}
-function blob(pos,scl,o={}){
- const g=new T3.SphereGeometry(1,o.w||40,o.h||28),p=g.attributes.position,a=o.n||0,f=o.f||5,sd=o.seed||1;
- for(let i=0;i<p.count;i++){let x=p.getX(i),y=p.getY(i),z=p.getZ(i);
-  if(o.def)[x,y,z]=o.def(x,y,z);
-  const k=1+a*Math.sin(f*x+sd)*Math.sin(f*1.13*y+2*sd)*Math.sin(f*.91*z+3*sd);p.setXYZ(i,x*k,y*k,z*k);}
- g.applyMatrix4(xform(pos,scl,o.r));g.computeVertexNormals();return g;}
-function lathe(a,b,rf,n=20){a=P(a);b=P(b);const len=a.distanceTo(b),pts=[new T3.Vector2(.0001,-rf(0)*.6)],N=20;
+/* ---- geometry helpers (skin outline only) ---- */
+function xform(pos,scl){return new T3.Matrix4().compose(P(pos),new T3.Quaternion(),P(scl));}
+function blob(pos,scl){const g=new T3.SphereGeometry(1,32,22);g.applyMatrix4(xform(pos,scl));g.computeVertexNormals();return g;}
+function lathe(a,b,rf,n=28){a=P(a);b=P(b);const len=a.distanceTo(b),pts=[new T3.Vector2(.0001,-rf(0)*.6)],N=16;
  for(let i=0;i<=N;i++){const t=i/N;pts.push(new T3.Vector2(rf(t),t*len));}
  pts.push(new T3.Vector2(.0001,len+rf(1)*.6));
  const g=new T3.LatheGeometry(pts,n),q=new T3.Quaternion().setFromUnitVectors(V(0,1,0),b.clone().sub(a).normalize());
  g.applyMatrix4(new T3.Matrix4().makeRotationFromQuaternion(q));g.translate(a.x,a.y,a.z);g.computeVertexNormals();return g;}
-const bump=t=>Math.exp(-((t/.09)**2));
-const bone=(a,b,r)=>lathe(a,b,t=>r*(1+.75*(bump(t)+bump(1-t))),14);
-const limb=(a,b,r1,r2)=>lathe(a,b,t=>r1+(r2-r1)*t,28);
-const LR=f=>[...f(1),...f(-1)];
-const S=s=>[s*.19,1.44,-.01],E=s=>[s*.25,1.14,-.025],W=s=>[s*.3,.88,0];
-const H=s=>[s*.085,.92,0],K=s=>[s*.095,.5,0];
+const limb=(a,b,r1,r2)=>lathe(a,b,t=>r1+(r2-r1)*t);
+function loft(R){const N=48,pos=[],idx=[];
+ for(const [y,cx,cz,rx,rz] of R)for(let i=0;i<=N;i++){const t=i/N*Math.PI*2;pos.push(cx+rx*Math.sin(t),y,cz+rz*Math.cos(t));}
+ for(let j=0;j<R.length-1;j++)for(let i=0;i<N;i++){const a=j*(N+1)+i,b=a+N+1;idx.push(a,b,a+1,b,b+1,a+1);}
+ const g=new T3.BufferGeometry();g.setAttribute('position',new T3.Float32BufferAttribute(pos,3));g.setIndex(idx);g.computeVertexNormals();return g;}
 
-/* heart transform shared with coronary arteries */
-const HM=xform([.02,1.285,.04],[.045,.056,.042],[0,.2,.45]);
-const heartDef=(x,y,z)=>{const k=y<0?1+y*.5:1;return[x*k,y,z*k];};
-function heartPt(lat,lon){lat*=Math.PI/180;lon*=Math.PI/180;let x=Math.cos(lat)*Math.sin(lon)*1.06,y=Math.sin(lat)*1.06,z=Math.cos(lat)*Math.cos(lon)*1.06;[x,y,z]=heartDef(x,y,z);return V(x,y,z).applyMatrix4(HM);}
-function heartCurve(f,n=16){const pts=[];for(let i=0;i<=n;i++){const t=i/n;const [la,lo]=f(t);const v=heartPt(la,lo);pts.push([v.x,v.y,v.z]);}return pts;}
-
-function ribPts(i,s,frac,dy=0,inset=0){
- const WD=[.07,.09,.105,.118,.127,.133,.135,.134,.13,.123,.112,.1];
- const yb=1.445-i*.021,zs=spineZ(yb)+.012,w=WD[i]-inset,fm=(i<7?.93:i<10?.82:.55)*frac,drop=.05+i*.006,pts=[];
- for(let j=0;j<=14;j++){const f=fm*Math.PI*j/14;pts.push([s*(.018+w*Math.sin(f)),yb-drop*(f/Math.PI)-.012*Math.sin(f)+dy,zs+(.165-inset)*(1-Math.cos(f))/2]);}
- return pts;}
-
-const BUILD={
- brain:()=>[blob([0,1.695,0],[.07,.062,.087],{n:.045,f:13,seed:2}),blob([0,1.695,.0],[.002,.06,.085])],
- heart:()=>{const g=new T3.SphereGeometry(1,40,28),p=g.attributes.position;for(let i=0;i<p.count;i++){const[x,y,z]=heartDef(p.getX(i),p.getY(i),p.getZ(i));p.setXYZ(i,x,y,z);}g.applyMatrix4(HM);g.computeVertexNormals();return[g];},
- lungs:()=>LR(s=>[blob([s*.074,1.325,.005],[.062,.125,.074],{n:.05,f:4,seed:s+3,def:(x,y,z)=>[x*(1-(y>.5?(y-.5)*.6:0)),y,z]})]),
- trachea:()=>[blob([0,1.565,.033],[.016,.018,.014]),tube([[0,1.56,.03],[0,1.48,.03],[0,1.39,.02]],.009,24,12),...LR(s=>[tube([[0,1.395,.02],[s*.03,1.365,.012],[s*.055,1.335,.004]],.006,16)])],
- oesophagus:()=>[tube([[0,1.56,-.006],[0,1.45,-.014],[.003,1.33,-.028],[.008,1.26,-.02],[.015,1.235,-.005]],.007,40)],
- liver:()=>[blob([-.045,1.19,.025],[.115,.062,.085],{n:.03,f:3,r:[0,0,-.18],def:(x,y,z)=>{const k=1-.5*(x+1)/2;return[x,y*k,z*(.75+.25*k)];}})],
- stomach:()=>[tube([[.012,1.238,-.005],[.04,1.228,.01],[.078,1.205,.025],[.094,1.165,.04],[.08,1.128,.05],[.045,1.112,.052],[.012,1.12,.044],[-.012,1.13,.03]],.026,48,14),blob([.065,1.215,.018],[.03,.028,.028])],
- pancreas:()=>[tube([[.115,1.14,-.035],[.07,1.125,-.015],[.02,1.115,-.005],[-.022,1.102,.005]],.01,24),blob([-.03,1.1,.006],[.02,.022,.016])],
- spleen:()=>[blob([.122,1.19,-.035],[.022,.045,.03],{r:[0,0,.4],n:.04})],
- kidneys:()=>LR(s=>[blob([s*.068,s>0?1.105:1.085,-.055],[.027,.05,.022],{r:[0,0,s*.2],def:(x,y,z)=>[x+(x*s<-.3?.25*(1-y*y):0)*s,y,z]})]),
- smallint:()=>{const pts=[];let d=1;for(let j=0;j<6;j++){const y=1.075-j*.022;for(let k=0;k<=6;k++){const t=k/6;pts.push([d*(-.07+.14*t),y+.006*Math.sin(t*9+j),.045+.022*Math.sin(t*Math.PI*3+j*1.7)]);}d*=-1;}return[tube(pts,.0105,320,8)];},
- largeint:()=>[blob([-.082,.965,.04],[.022,.024,.022]),tube([[-.085,.97,.04],[-.1,1.03,.035],[-.1,1.09,.03],[-.085,1.105,.06],[-.03,1.1,.08],[.03,1.1,.08],[.09,1.115,.055],[.105,1.09,.03],[.105,1.02,.03],[.1,.96,.03],[.06,.94,.04],[.02,.945,.02],[.005,.925,-.03],[0,.87,-.045]],.016,120,12),tube([[-.075,.95,.04],[-.07,.93,.03],[-.058,.922,.036]],.004,12)],
- bladder:()=>[blob([0,.905,.045],[.035,.03,.03])],
- skull:()=>[blob([0,1.67,.005],[.085,.105,.1],{n:.01,f:6}),blob([0,1.605,.07],[.045,.025,.03]),tube([[-.062,1.62,-.005],[-.055,1.575,.03],[-.03,1.548,.075],[0,1.545,.088],[.03,1.548,.075],[.055,1.575,.03],[.062,1.62,-.005]],.011,40,10)],
- spine:()=>{const g=[],N=24;for(let i=0;i<N;i++){const y=1.565-i*(.545/(N-1)),z=spineZ(y),r=i<7?.012:i<19?.016:.022,h=.545/(N-1)*.7;
-   const c=new T3.CylinderGeometry(r,r,h,18);c.translate(0,y,z);g.push(c);
-   g.push(blob([0,y-.004,z-r-.014],[.005,.007,.014+(i>6&&i<19?.004:0)],{w:12,h:8,r:[i>6&&i<19?.5:.1,0,0]}));
-   g.push(...LR(s=>[blob([s*(r+.009),y,z-r*.55],[.011,.004,.005],{w:12,h:8})]));
-   if(i<N-1){const d=new T3.CylinderGeometry(r*.95,r*.95,h*.35,18);d.translate(0,y-.545/(N-1)*.5,spineZ(y-.012));g.push([d,'#9fc4cc']);}}
-  g.push(blob([0,.965,-.062],[.036,.05,.016],{r:[.35,0,0],def:(x,y,z)=>{const k=y<0?1+y*.55:1;return[x*k,y,z];}}),blob([0,.905,-.072],[.008,.014,.007],{r:[.6,0,0]}));return g;},
- ribs:()=>{const g=[];for(let i=0;i<12;i++)for(const s of[1,-1]){const pts=ribPts(i,s,1);g.push(tube(pts,.0058,36,6));
-   if(i<10){const e=pts[pts.length-1],ty=i<7?Math.min(1.43,Math.max(1.27,e[1]+.012)):1.255;g.push([tube([e,[s*(i<7?.014:.04),ty,.094]],.0048,8,6),'#a9cbd0']);}}return g;},
- sternum:()=>[blob([0,1.405,.092],[.024,.026,.008],{r:[-.15,0,0]}),blob([0,1.325,.095],[.016,.07,.007],{r:[-.15,0,0]}),blob([0,1.245,.103],[.007,.016,.004],{r:[-.2,0,0]})],
- clavicle:()=>LR(s=>[tube([[s*.02,1.465,.072],[s*.08,1.47,.076],[s*.13,1.48,.032],[s*.18,1.47,-.006]],.0075,24)]),
- scapula:()=>LR(s=>[blob([s*.11,1.37,-.095],[.05,.072,.007],{r:[.1,s*-.45,0],def:(x,y,z)=>{const k=1+Math.min(0,y)*.7;return[x*k+(1-k)*s*.4,y,z];}}),tube([[s*.1,1.43,-.098],[s*.15,1.46,-.06],[s*.18,1.465,-.02]],.0065,16)]),
- humerus:()=>LR(s=>[blob([s*.178,1.44,-.012],[.021,.021,.021]),bone(S(s),E(s),.011)]),
- radiusulna:()=>LR(s=>{const e=E(s),w=W(s);return[bone([e[0]+s*.012,e[1]-.012,e[2]+.008],[w[0]+s*.013,w[1],w[2]+.005],.0072),bone([e[0]-s*.008,e[1]+.012,e[2]-.012],[w[0]-s*.011,w[1],w[2]-.003],.0072)];}),
- hand:()=>LR(s=>{const w=W(s),g=[blob([w[0]+s*.004,w[1]-.016,w[2]],[.022,.013,.009])];
-   const t0=[w[0]+s*.017,w[1]-.022,w[2]+.006],t1=[w[0]+s*.036,w[1]-.05,w[2]+.014],t2=[w[0]+s*.048,w[1]-.08,w[2]+.02];g.push(bone(t0,t1,.0045),bone(t1,t2,.004));
-   for(let k=1;k<5;k++){const x=w[0]+s*(.012-(k-1)*.009),b=[x,w[1]-.026,w[2]],m=[x+s*.006,w[1]-.078,w[2]],tip=[x+s*.012,w[1]-.078-(k===4?.052:.07),w[2]];g.push(bone(b,m,.0042),bone(m,tip,.0033));}return g;}),
- pelvis:()=>{const ring=new T3.TorusGeometry(.062,.012,12,48);ring.scale(1.2,1,.9);ring.rotateX(1.15);ring.translate(0,.928,.008);
-   return[ring,...LR(s=>[blob([s*.1,1.0,-.015],[.062,.055,.013],{r:[.15,s*.65,s*.3],n:.03})])];},
- femur:()=>LR(s=>[blob([s*.086,.925,0],[.021,.021,.021]),blob([s*.135,.902,-.006],[.012,.015,.012]),tube([[s*.088,.922,0],[s*.11,.905,0],[s*.127,.89,0]],.011,10),bone([s*.127,.895,0],K(s),.0125)]),
- patella:()=>LR(s=>[blob([s*.097,.515,.045],[.02,.024,.009])]),
- tibiafibula:()=>LR(s=>[bone([s*.093,.495,.005],[s*.093,.085,-.005],.0125),bone([s*.118,.478,-.012],[s*.12,.07,-.012],.0062)]),
- foot:()=>LR(s=>{const g=[blob([s*.095,.065,0],[.018,.012,.022]),blob([s*.095,.035,-.035],[.017,.02,.032])];
-   for(let k=0;k<5;k++){const x=s*(.095+(-.02+k*.011)),r=k===0?.0068:.0048;const b=[x*.98+s*.0,.05,.018],m=[x+s*k*.003,.022,.1],t=[x+s*k*.005,.012,.15-k*.009];g.push(bone(b,m,r),bone(m,t,r*.85));}return g;}),
- aorta:()=>[tube([[.012,1.33,.045],[.01,1.38,.045],[.022,1.41,.03],[.035,1.405,0],[.03,1.38,-.035],[.03,1.25,-.03],[.022,1.12,-.008],[.008,.995,.012]],.0105,64,12)],
- vena:()=>[tube([[-.012,1.325,.04],[-.02,1.38,.035],[-.022,1.432,.03]],.009,16,10),tube([[-.012,1.265,.03],[-.02,1.2,.0],[-.024,1.1,-.004],[-.014,.992,.002]],.0105,32,10)],
- pulmonary:()=>[tube([[.002,1.315,.07],[0,1.355,.05],[0,1.372,.022]],.0085,12,10),...LR(s=>[tube([[0,1.372,.022],[s*.035,1.362,.006],[s*.068,1.345,0]],.0065,16)]),
-   ...LR(s=>[[tube([[s*.066,1.302,-.006],[s*.035,1.292,0],[.022,1.292,.012]],.005,16),'#e0403f']])],
- coronary:()=>[tube(heartCurve(t=>[62-150*t,18-8*t]),.0022,40,6),tube(heartCurve(t=>[48,-12-130*t]),.0022,40,6),tube(heartCurve(t=>[48-60*t,-142-20*t]),.0022,24,6),tube(heartCurve(t=>[52,30+120*t]),.0022,40,6)],
- carotid:()=>LR(s=>[tube([s>0?[.026,1.415,.024]:[.008,1.415,.032],[s*.022,1.47,.026],[s*.028,1.55,.03],[s*.03,1.6,.006],[s*.025,1.65,0]],.0045,32)]),
- jugular:()=>LR(s=>[tube([[s*.042,1.625,-.005],[s*.044,1.54,.012],[s*.037,1.47,.022],[s>0?-.004:-.016,1.44,.03],[-.022,1.432,.03]],.0055,32)]),
- armarteries:()=>LR(s=>[tube([s>0?[.034,1.41,.01]:[.01,1.415,.032],[s*.07,1.45,.012],[s*.15,1.43,.0],[s*.2,1.39,0],[s*.235,1.25,.012],[s*.255,1.14,.012],[s*.28,1.0,.016],[s*.3,.89,.016],[s*.31,.85,.012]],.004,64)]),
- femart:()=>LR(s=>[tube([[.008,.995,.012],[s*.045,.952,.026],[s*.075,.9,.04],[s*.086,.78,.036],[s*.09,.62,.004],[s*.095,.52,-.03],[s*.095,.35,-.02],[s*.1,.12,0]],.0055,64)]),
- femvein:()=>LR(s=>[tube([[-.014,.992,.002],[s*.033,.948,.018],[s*.063,.9,.03],[s*.075,.78,.027],[s*.079,.62,-.006],[s*.083,.52,-.04],[s*.084,.35,-.03],[s*.088,.12,-.008]],.006,64)]),
- cerebellum:()=>[blob([0,1.632,-.05],[.046,.028,.034],{n:.05,f:22})],
- brainstem:()=>[tube([[0,1.67,-.02],[0,1.62,-.03],[0,1.565,-.036]],.011,16,12)],
- spinalcord:()=>{const pts=[];for(let y=1.575;y>=1.075;y-=.025)pts.push([0,y,spineZ(y)-.024]);const g=[tube(pts,.0058,64,8)];
-   for(let k=-2;k<=2;k++)g.push(tube([[0,1.08,spineZ(1.08)-.024],[k*.004,1.0,spineZ(1.0)-.022],[k*.01,.95,-.07]],.0018,12,5));return g;},
- spinalnerves:()=>{const g=[];for(let i=0;i<12;i++)for(const s of[1,-1]){const pts=ribPts(i,s,.75,-.009,.006);pts.unshift([s*.006,pts[0][1]+.004,spineZ(pts[0][1])-.022]);g.push(tube(pts,.0022,30,5));}
-   for(const y of[1.17,1.12,1.07,1.03])for(const s of[1,-1])g.push(tube([[s*.006,y,spineZ(y)-.022],[s*.04,y-.02,spineZ(y)-.005],[s*.075,y-.06,spineZ(y)+.02]],.0024,12,5));return g;},
- armnerves:()=>LR(s=>{const o=[[s*.012,1.5,spineZ(1.5)-.02],[s*.08,1.47,-.02],[s*.17,1.42,-.01]];return[
-   tube([...o,[s*.215,1.3,.012],[s*.248,1.14,.018],[s*.275,1.0,.02],[s*.3,.88,.018],[s*.306,.82,.012]],.0028,64,6),
-   tube([o[2],[s*.205,1.3,-.005],[s*.23,1.15,-.036],[s*.262,1.0,-.006],[s*.283,.88,.004],[s*.288,.8,.004]],.0028,48,6),
-   tube([o[2],[s*.215,1.33,-.032],[s*.245,1.22,-.012],[s*.266,1.14,.008],[s*.296,1.0,.01],[s*.318,.88,.006]],.0028,48,6)];}),
- sciatic:()=>LR(s=>[tube([[s*.03,.985,spineZ(.985)],[s*.062,.93,-.072],[s*.09,.86,-.062],[s*.096,.7,-.046],[s*.096,.585,-.04]],.0055,32,8),
-   tube([[s*.096,.585,-.04],[s*.095,.48,-.04],[s*.095,.3,-.03],[s*.09,.1,-.02]],.0036,32,6),tube([[s*.096,.585,-.04],[s*.115,.5,-.025],[s*.125,.45,0],[s*.115,.3,.02]],.003,24,6)]),
- vagus:()=>LR(s=>[tube([[s*.012,1.585,-.03],[s*.033,1.55,.012],[s*.036,1.47,.016],[s*.03,1.38,0],[s*.02,1.28,-.02],[s*.012,1.2,0],[s>0?.045:.02,1.15,.03]],.0024,48,6)])
-};
+/* ---- load the real anatomy (BodyParts3D meshes + routed nerve/vessel paths) ---- */
+const loadEl=$('#loading');let J,buf;
+try{const [r1,r2]=await Promise.all([fetch('anatomy.json'),fetch('anatomy.bin')]);if(!r1.ok||!r2.ok)throw 0;J=await r1.json();buf=await r2.arrayBuffer();}
+catch(e){loadEl.textContent='Could not load the 3D anatomy files. Please reload the page.';return;}
 
 /* ---- scene ---- */
 const stage=$('#stage'),cv=$('#cv');
 const renderer=new T3.WebGLRenderer({canvas:cv,antialias:true,alpha:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
 const scene=new T3.Scene(),camera=new T3.PerspectiveCamera(35,1,.01,50);
-scene.add(new T3.HemisphereLight(0xe6f0ff,0x1a2226,.95));
-const key=new T3.DirectionalLight(0xffffff,.85);key.position.set(1.5,3,2.5);scene.add(key);
+scene.add(new T3.HemisphereLight(0xe6f0ff,0x1a2226,.9));
+const key=new T3.DirectionalLight(0xffffff,.8);key.position.set(1.5,3,2.5);scene.add(key);
 const rim=new T3.DirectionalLight(0x9fd8ff,.55);rim.position.set(-2,1.5,-2.5);scene.add(rim);
-const fill=new T3.DirectionalLight(0xffe2cc,.25);fill.position.set(-2,0,2);scene.add(fill);
-
+const fill=new T3.DirectionalLight(0xffe2cc,.3);fill.position.set(-2,0,2);scene.add(fill);
 const floor=new T3.Mesh(new T3.RingGeometry(.3,.305,96),new T3.MeshBasicMaterial({color:0x8fdcd2,transparent:true,opacity:.35}));
 floor.rotation.x=-Math.PI/2;scene.add(floor);
-const disc=new T3.Mesh(new T3.CircleGeometry(.3,64),new T3.MeshBasicMaterial({color:0x8fdcd2,transparent:true,opacity:.05,depthWrite:false}));disc.rotation.x=-Math.PI/2;disc.position.y=-.001;scene.add(disc);
+const disc=new T3.Mesh(new T3.CircleGeometry(.3,64),new T3.MeshBasicMaterial({color:0x8fdcd2,transparent:true,opacity:.05,depthWrite:false}));disc.rotation.x=-Math.PI/2;disc.position.y=-.002;scene.add(disc);
 
 const pick=[];
-for(const p of PARTS){
- p.group=new T3.Group();p.mats=[];p.base=p.op||1;p.col=new T3.Color(p.c);
- for(let it of BUILD[p.id]()){let col=p.c;if(Array.isArray(it)){col=it[1];it=it[0];}
-  const m=new T3.MeshStandardMaterial({color:col,roughness:.55,metalness:.05,transparent:true,opacity:p.base,depthWrite:p.base>.7});
-  const mesh=new T3.Mesh(it,m);mesh.userData.p=p;p.group.add(mesh);p.mats.push(m);pick.push(mesh);}
- p.box=new T3.Box3().setFromObject(p.group);p.center=p.box.getCenter(V(0,0,0));
- scene.add(p.group);}
+for(const p of PARTS){p.group=new T3.Group();p.mats=[];p.mc={};p.base=p.op||1;p.col=new T3.Color(p.c);scene.add(p.group);}
+function matFor(p,col){col=col||p.c;if(!p.mc[col]){const m=new T3.MeshStandardMaterial({color:col,roughness:.6,metalness:.02,transparent:true,opacity:p.base,depthWrite:p.base>.7,side:T3.DoubleSide});p.mc[col]=m;p.mats.push(m);}return p.mc[col];}
+function add(p,g,col){const mesh=new T3.Mesh(g,matFor(p,col));mesh.userData.p=p;p.group.add(mesh);pick.push(mesh);}
+for(const m of J.meshes){const p=byId[m.p];if(!p)continue;
+ const q=new Int16Array(buf,m.vo,m.nv*3),pos=new Float32Array(m.nv*3);for(let i=0;i<pos.length;i++)pos[i]=q[i]*J.scale;
+ const g=new T3.BufferGeometry();g.setAttribute('position',new T3.BufferAttribute(pos,3));g.setIndex(new T3.BufferAttribute(new Uint16Array(buf,m.io,m.ni),1));g.computeVertexNormals();add(p,g,m.c);}
+for(const t of J.tubes){const p=byId[t.p];if(!p)continue;const c=new T3.CatmullRomCurve3(t.pts.map(P));add(p,new T3.TubeGeometry(c,Math.max(8,Math.round(c.getLength()*220)),t.r,8,false),t.c);}
+for(const p of PARTS){p.box=new T3.Box3().setFromObject(p.group);p.center=p.box.getCenter(V(0,0,0));}
 
-/* glass skin outline (fresnel) */
+/* glass skin outline (fresnel), fitted to the real skeleton */
 const skinU={c:{value:new T3.Color('#9fe3dc')},k:{value:1}};
 const skinMat=new T3.ShaderMaterial({uniforms:skinU,transparent:true,depthWrite:false,
  vertexShader:'varying vec3 vN;varying vec3 vV;void main(){vec4 mv=modelViewMatrix*vec4(position,1.0);vN=normalize(normalMatrix*normal);vV=normalize(-mv.xyz);gl_Position=projectionMatrix*mv;}',
- fragmentShader:'uniform vec3 c;uniform float k;varying vec3 vN;varying vec3 vV;void main(){float f=pow(1.0-abs(dot(normalize(vN),normalize(vV))),2.6);gl_FragColor=vec4(c,(f*0.55+0.012)*k);}'});
-const skin=new T3.Group();
-const torso=new T3.LatheGeometry([[.0001,.84],[.11,.85],[.165,.9],[.16,1.0],[.138,1.1],[.15,1.24],[.172,1.37],[.185,1.44],[.13,1.5],[.05,1.52]].map(a=>new T3.Vector2(a[0],a[1])),48);
-torso.scale(1,1,.64);torso.computeVertexNormals();
-const skinG=[torso,blob([0,1.665,.012],[.1,.125,.115]),limb([0,1.47,0],[0,1.585,.005],.05,.045),
- ...LR(s=>[blob(S(s),[.05,.05,.05]),limb(S(s),E(s),.044,.034),limb(E(s),W(s),.034,.024),blob([W(s)[0]+s*.012,W(s)[1]-.07,W(s)[2]+.004],[.036,.072,.016]),
-  lathe(H(s).map((v,i)=>i===1?.95:v),K(s),t=>.083-.035*t+.012*Math.sin(Math.PI*t),32),lathe(K(s),[s*.095,.075,-.01],t=>.049-.024*t+.012*Math.sin(Math.PI*Math.min(1,t*1.6)),32),blob([s*.095,.03,.045],[.04,.03,.1])])];
+ fragmentShader:'uniform vec3 c;uniform float k;varying vec3 vN;varying vec3 vV;void main(){float f=pow(1.0-abs(dot(normalize(vN),normalize(vV))),2.6);gl_FragColor=vec4(c,(f*0.5+0.01)*k);}'});
+const skin=new T3.Group(),SH=J.shell,R=SH.rings.slice(),top=R[R.length-1],bot=R[0];
+R.unshift([bot[0]-.035,bot[1],bot[2],bot[3]*.8,bot[4]*.8]);R.push([top[0]+.035,top[1],top[2],top[3]*.6,top[4]*.75],[top[0]+.06,top[1],top[2]-.005,.055,.05]);
+const skinG=[loft(R),...SH.blobs.map(b=>blob(b.slice(0,3),b.slice(3))),...SH.limbs.map(l=>limb(l[0],l[1],l[2],l[3])),...SH.limbs.slice(0,0)];
 for(const g of skinG){const m=new T3.Mesh(g,skinMat);m.renderOrder=10;skin.add(m);}
 scene.add(skin);
+loadEl.remove();
 
 /* ---- camera control ---- */
-const cam={T:V(0,.93,0),r:3.0,th:0,ph:1.47};let tween=null,spin=true,lastUser=performance.now();
+const cam={T:V(0,.86,0),r:3.0,th:0,ph:1.47};let tween=null,spin=true,lastUser=performance.now();
 function placeCam(){const sp=Math.sin(cam.ph);camera.position.set(cam.T.x+cam.r*sp*Math.sin(cam.th),cam.T.y+cam.r*Math.cos(cam.ph),cam.T.z+cam.r*sp*Math.cos(cam.th));camera.lookAt(cam.T);}
 function flyTo(T,r,th,ph,dur=1000){let d=((th-cam.th)%(2*Math.PI)+3*Math.PI)%(2*Math.PI)-Math.PI;
  tween={a:{T:cam.T.clone(),r:cam.r,th:cam.th,ph:cam.ph},b:{T,r,th:cam.th+d,ph},t0:performance.now(),dur:matchMedia('(prefers-reduced-motion: reduce)').matches?1:dur};}
 const ease=t=>t<.5?4*t*t*t:1-((-2*t+2)**3)/2;
 function resize(){const w=stage.clientWidth,h=stage.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;
  camera.updateProjectionMatrix();if(!sel&&!tween)cam.r=fitR();}
-const fitR=()=>{const a=camera.aspect||1;return Math.max(3.2,3.2*(.62/a));};
+const fitR=()=>{const a=camera.aspect||1;return Math.max(3.0,3.0*(.62/a));};
 const ro=new ResizeObserver(resize);ro.observe(stage);
 
 const ptrs=new Map();let down=null,pinch=0;
@@ -533,17 +454,17 @@ function setHover(p){if(p===hover)return;hover=p;cv.classList.toggle('hov',!!p);
  if(p&&!quiz.on){tip.textContent=p.name;tip.style.opacity=1;}else tip.style.opacity=0;}
 function clickPick(){const p=hitPart();if(quiz.on){if(p)answer(p);return;}if(p)select(p);else if(sel)select(null);}
 function styles(){for(const p of PARTS){p.group.visible=shown(p);const ghost=sel&&p!==sel;
- for(const m of p.mats){m.opacity=ghost?.07:p.base;m.depthWrite=!ghost&&p.base>.7;}}
- skin.visible=showSkin;skinU.k.value=sel?.45:1;}
+ for(const m of p.mats){m.opacity=ghost?.035:p.base;m.depthWrite=!ghost&&p.base>.7;}}
+ skin.visible=showSkin;skinU.k.value=sel?.25:1;}
 
 function select(p,fly=true){
  if(p&&!shown(p)){layers[p.sys[0]]=true;renderLayers();}
  sel=p;styles();renderList();renderInfo();
  const pin=$('#pin');if(p){pin.style.display='block';pin.style.setProperty('--pc',p.c);pin.querySelector('span').textContent=p.name;}else pin.style.display='none';
  if(!fly)return;
- if(p){const size=p.box.getSize(V(0,0,0)).length()/2,r=Math.max(.3,size/Math.sin(camera.fov*Math.PI/360)*1.05);
+ if(p){const size=p.box.getSize(V(0,0,0)).length()/2,r=Math.max(.3,size/Math.sin(camera.fov*Math.PI/360)*1.5);
   const side=Math.max(-.55,Math.min(.55,p.center.x*3));flyTo(p.center.clone(),Math.min(r,3),p.view==='back'?Math.PI-side:side,1.4);}
- else flyTo(V(0,.93,0),fitR(),cam.th,1.47);}
+ else flyTo(V(0,.86,0),fitR(),cam.th,1.47);}
 
 /* ---- UI: layers, list, info ---- */
 function renderLayers(){$('#layers').innerHTML=Object.entries(SYS).map(([k,s])=>`<button class="chip" data-l="${k}" aria-pressed="${layers[k]}" style="--c:var(${s.v})"><i></i>${s.name}</button>`).join('')+
@@ -565,7 +486,7 @@ function renderInfo(){const el=$('#info');
   <p>Drag to turn the body, scroll or pinch to zoom, and tap any part to fly in. Switch systems on and off at the top to peel back the layers.</p>
   <div class="sys">${Object.entries(SYS).map(([k,s])=>`<button data-sys="${k}" style="--c:var(${s.v})"><b>${s.name} · ${PARTS.filter(p=>p.sys.includes(k)).length} parts</b><span>${s.about}</span></button>`).join('')}</div>
   <div class="legend"><span><i style="background:#e0403f"></i>Oxygen-rich blood</span><span><i style="background:#3f7fe0"></i>Oxygen-poor blood</span></div>
-  <p class="small">For learning, not medical advice. The 3D model is simplified: shapes, sizes and positions are approximate.</p>`;return;}
+  <p class="small">For learning, not medical advice. 3D anatomy: <a href="https://dbarchive.biosciencedbc.jp/en/bodyparts3d/" style="color:inherit">BodyParts3D</a>, © The Database Center for Life Science, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color:inherit">CC BY 4.0</a>, simplified for the web. Nerves outside the brain and the arm and leg blood vessels aren’t in that dataset, so they are drawn along the real bones and are approximate.</p>`;return;}
  const p=sel;el.innerHTML=`<button class="back" id="backBtn">← Whole body</button>
   <h2>${p.name}</h2>${p.aka?`<p class="aka">${p.aka}</p>`:''}
   <div class="tags">${p.sys.map(s=>`<span class="tag" style="--c:var(${SYS[s].v})">${SYS[s].name}</span>`).join('')}</div>
@@ -573,15 +494,15 @@ function renderInfo(){const el=$('#info');
   <div class="note"><h4>Why doctors care</h4><p>${p.doc}</p></div>
   <div class="note fact"><h4>Did you know?</h4><p>${p.fact}</p></div>
   <h4>Connected parts</h4><div class="rel">${p.rel.map(id=>`<button data-id="${id}">${byId[id].name}</button>`).join('')}</div>
-  <p class="small">For learning, not medical advice. The 3D model is simplified.</p>`;}
+  <p class="small">For learning, not medical advice. 3D anatomy from BodyParts3D (CC BY 4.0), simplified for the web.</p>`;}
 $('#info').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
  if(b.id==='backBtn')select(null);else if(b.dataset.id&&!quiz.on)select(byId[b.dataset.id]);
  else if(b.dataset.sys){const k=b.dataset.sys;for(const s in layers)layers[s]=s===k;renderLayers();styles();renderList();renderInfo();}});
 
 /* ---- views ---- */
-$('#vFront').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.93,0),sel?cam.r:fitR(),0,1.47);};
-$('#vBack').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.93,0),sel?cam.r:fitR(),Math.PI,1.47);};
-$('#vSide').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.93,0),sel?cam.r:fitR(),Math.PI/2,1.47);};
+$('#vFront').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.86,0),sel?cam.r:fitR(),0,1.47);};
+$('#vBack').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.86,0),sel?cam.r:fitR(),Math.PI,1.47);};
+$('#vSide').onclick=()=>{stopSpin();flyTo(sel?sel.center.clone():V(0,.86,0),sel?cam.r:fitR(),Math.PI/2,1.47);};
 $('#vSpin').onclick=e=>{spin=!spin;e.currentTarget.setAttribute('aria-pressed',spin);lastUser=0;};
 $('#vSkin').onclick=e=>{showSkin=!showSkin;e.currentTarget.setAttribute('aria-pressed',showSkin);styles();};
 addEventListener('keydown',e=>{if(e.key==='Escape'&&sel&&!quiz.on)select(null);});
